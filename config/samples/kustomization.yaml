@@ -1,0 +1,4 @@
+## Append samples of your project ##
+resources:
+- see-operator_v1_seeoperator.yaml
+# +kubebuilder:scaffold:manifestskustomizesamples

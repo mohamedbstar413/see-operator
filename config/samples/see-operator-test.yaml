@@ -1,0 +1,13 @@
+apiVersion: see-operator.example.com/v1
+kind: SeeOperator
+metadata:
+  labels:
+    app.kubernetes.io/name: see-op
+    app.kubernetes.io/managed-by: kustomize
+  name: seeoperator-sample
+spec:
+  namespacesToMonitor:
+    - default
+  probeSelectorLabels:
+    release: monitoring
+  dependencies: false

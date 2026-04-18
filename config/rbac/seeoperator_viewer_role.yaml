@@ -1,0 +1,29 @@
+# This rule is not used by the project see-op itself.
+# It is provided to allow the cluster admin to help manage permissions for users.
+#
+# Grants read-only access to see-operator.example.com resources.
+# This role is intended for users who need visibility into these resources
+# without permissions to modify them. It is ideal for monitoring purposes and limited-access viewing.
+
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/name: see-op
+    app.kubernetes.io/managed-by: kustomize
+  name: seeoperator-viewer-role
+rules:
+- apiGroups:
+  - see-operator.example.com
+  resources:
+  - seeoperators
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - see-operator.example.com
+  resources:
+  - seeoperators/status
+  verbs:
+  - get

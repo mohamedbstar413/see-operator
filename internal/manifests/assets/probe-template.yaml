@@ -1,0 +1,23 @@
+apiVersion: monitoring.coreos.com/v1
+kind: Probe
+metadata:
+  name: probe-name
+  namespace: probe-namespace
+  labels:
+    prometheus-label: value
+spec:
+  jobName: blackbox-job-name
+
+  prober:
+    url: blackbox-exporter-url
+    path: /probe
+
+  module: http-or-https
+
+  targets:
+    staticConfig:
+      static:
+        - pod-scrape-path
+
+  interval: 30s
+  scrapeTimeout: 10s
