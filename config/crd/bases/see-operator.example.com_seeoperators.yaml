@@ -59,6 +59,8 @@ spec:
           status:
             description: status defines the observed state of SeeOperator
             properties:
+              blackboxExporterUrl:
+                type: string
               conditions:
                 description: |-
                   conditions represent the current state of the SeeOperator resource.

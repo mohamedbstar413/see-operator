@@ -18,9 +18,11 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"slices"
 
 	manifests "github.com/mohamedbstar413/see-operator/internal/manifests"
+	"github.com/mohamedbstar413/see-operator/internal/utils"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -46,6 +48,7 @@ type SeeOperatorReconciler struct {
 
 func (r *SeeOperatorReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
+	var sweep bool // to determine if there is a need to create new probes in already sweeped namespaces or not
 
 	// add seeoperator object to the scheme
 	seeoperatorv1.AddToScheme(r.Scheme)
@@ -63,9 +66,24 @@ func (r *SeeOperatorReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	}
 
 	// check if the blackbox exporter is given in the CRD yaml or not
-	blackboxExporterUrl := seeOperatorLive.Spec.BlackboxUrl
+	var blackboxExporterUrl string
+	blackboxExporterUrlFromSpec := seeOperatorLive.Spec.BlackboxUrl
+	blackboxExporterUrlFromStatus := seeOperatorLive.Status.BlackboxExporterUrl
+	if blackboxExporterUrlFromSpec != "" || blackboxExporterUrlFromStatus != "" {
+		if blackboxExporterUrlFromSpec != "" {
+			blackboxExporterUrl = blackboxExporterUrlFromSpec
+		} else {
+			blackboxExporterUrl = blackboxExporterUrlFromStatus
+		}
+	}
 	if blackboxExporterUrl != "" {
 		logger.Info("Blackbox exporter URL provided in the CRD", "URL", blackboxExporterUrl)
+		seeOperatorLive.Status.BlackboxExporterUrl = blackboxExporterUrl
+		err = r.Status().Update(ctx, &seeOperatorLive)
+		if err != nil {
+			logger.Error(err, "Can't update blackbox exporter url in status", blackboxExporterUrl)
+			return ctrl.Result{}, err
+		}
 	} else {
 		logger.Info("No Blackbox exporter URL provided in the CRD, using default URL")
 		// create the blackbox exporter resources from templates
@@ -76,12 +94,12 @@ func (r *SeeOperatorReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		cm := manifests.GetBlackboxCM(r.Scheme)
 		cm.Namespace = seeOperatorLive.Namespace
 
-		//set owner reference to the CM as the  seeoperator CRD
+		// set owner reference to the CM as the seeoperator CRD
 		err = ctrl.SetControllerReference(&seeOperatorLive, cm, r.Scheme)
 		if err != nil {
 			return ctrl.Result{}, err
 		}
-		//check if the CM already exists, if not create it
+		// check if the CM already exists, if not create it
 		var existingCM corev1.ConfigMap
 		err = r.Get(ctx, client.ObjectKey{Name: cm.Name, Namespace: cm.Namespace}, &existingCM)
 		if err != nil && apierrors.IsNotFound(err) {
@@ -97,18 +115,17 @@ func (r *SeeOperatorReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 			return ctrl.Result{}, err
 		} else {
 			logger.Info("Blackbox exporter ConfigMap already exists, skipping creation")
-			return ctrl.Result{}, nil
 		}
 
 		bbService := manifests.GetBlackboxService(r.Scheme)
 		bbService.Namespace = seeOperatorLive.Namespace
 
-		//set owner reference to the service as the  seeoperator CRD
+		// set owner reference to the service as the seeoperator CRD
 		err = ctrl.SetControllerReference(&seeOperatorLive, bbService, r.Scheme)
 		if err != nil {
 			return ctrl.Result{}, err
 		}
-		//check if the service already exists, if not create it
+		// check if the service already exists, if not create it
 		var existingService corev1.Service
 		err = r.Get(ctx, client.ObjectKey{Name: bbService.Name, Namespace: bbService.Namespace}, &existingService)
 		if err != nil && apierrors.IsNotFound(err) {
@@ -124,15 +141,12 @@ func (r *SeeOperatorReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 			return ctrl.Result{}, err
 		} else {
 			logger.Info("Blackbox exporter Service already exists, skipping creation")
-			return ctrl.Result{}, nil
 		}
 
 		bbDeployment := manifests.GetBlackboxDeployment(r.Scheme)
 		bbDeployment.Namespace = seeOperatorLive.Namespace
 
-		//set owner reference to the deployment as the  seeoperator CRD
-
-		//check if the deployment already exists, if not create it
+		// check if the deployment already exists, if not create it
 		var existingDeployment appsv1.Deployment
 		err = r.Get(ctx, client.ObjectKey{Name: bbDeployment.Name, Namespace: bbDeployment.Namespace}, &existingDeployment)
 		if err != nil && apierrors.IsNotFound(err) {
@@ -148,16 +162,33 @@ func (r *SeeOperatorReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 			}
 			logger.Info("Created Blackbox exporter Deployment", "Deployment", bbDeployment.Name)
 			blackboxExporterUrl = bbService.Name + "." + bbService.Namespace + ".svc.cluster.local" + ":" + "9115"
+			//update seeoperator status
+			seeOperatorLive.Status.BlackboxExporterUrl = blackboxExporterUrl
+			err = r.Status().Update(ctx, &seeOperatorLive)
+			if err != nil {
+				logger.Error(err, "error updating blackboxexporterurl", blackboxExporterUrl)
+				return ctrl.Result{}, err
+			}
+			logger.Info("Updated blackbox exporter url in status successfully!")
 		} else if err != nil {
 			logger.Error(err, "Failed to get Blackbox exporter Deployment")
 			return ctrl.Result{}, err
 		} else {
 			logger.Info("Blackbox exporter Deployment already exists, skipping creation")
-			return ctrl.Result{}, nil
+		}
+
+		//now the blackbox all infra are created
+		//update the status of operator
+		blackboxExporterUrl = bbService.Name + "." + bbService.Namespace + ".svc.cluster.local" + ":9115"
+		seeOperatorLive.Status.BlackboxExporterUrl = blackboxExporterUrl
+		err = r.Status().Update(ctx, &seeOperatorLive)
+		if err != nil {
+			logger.Error(err, "Failed to get Blackbox exporter Deployment")
+			return ctrl.Result{}, err
 		}
 	}
 
-	//create the cronjob if not exists
+	// create the cronjob if not exists
 	var cronjob *batchv1.CronJob
 	cronjob = manifests.GetCronJobYaml(r.Scheme)
 	cronjob.Namespace = seeOperatorLive.Namespace
@@ -187,6 +218,114 @@ func (r *SeeOperatorReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	namespacesToMonitor := seeOperatorLive.Spec.NamespacesToMonitor
 	statusNamespacesToMonitor := seeOperatorLive.Status.Namespaces
 
+	// get all pods in the namespacesToMonitor and see difference between them and the statusNamespacesToMonitor
+	// to decide if we need to create new probes or delete existing probes or do nothing
+	for _, nsToMonitor := range namespacesToMonitor {
+		// List all endpoints in the namespace
+		allEndpoints := &corev1.EndpointsList{}
+		err = r.List(ctx, allEndpoints, client.InNamespace(nsToMonitor))
+		if err != nil {
+			logger.Error(err, "Failed to list endpoints", "Namespace", nsToMonitor)
+			return ctrl.Result{}, err
+		}
+
+		probeList := &monitoringv1.ProbeList{}
+		err = r.List(ctx, probeList, client.InNamespace(nsToMonitor))
+		if err != nil {
+			logger.Error(err, "Failed to list probes", "Namespace", nsToMonitor)
+			return ctrl.Result{}, err
+		}
+
+		// Build a set of expected probe names from endpoints
+		existingProbeNames := make(map[string]bool)
+		for _, p := range probeList.Items {
+			existingProbeNames[p.Name] = true
+		}
+
+		// Check if any endpoint doesn't have a corresponding probe yet
+		for _, ep := range allEndpoints.Items {
+			expectedProbeName := ep.Name + "-" + ep.Namespace + "-probe"
+			if !existingProbeNames[expectedProbeName] {
+				sweep = true
+				break
+			}
+		}
+	}
+
+	// if new services are added to an ns that is already monitored ==> create a probe for that service
+	if sweep {
+		logger.Info("There is a need to sweep the namespaces to monitor to create new probes")
+		for _, nsToMonitor := range namespacesToMonitor {
+			logger.Info("Sweeping namespace to monitor", "Namespace", nsToMonitor)
+			allEndpoints := &corev1.EndpointsList{}
+			err = r.List(ctx, allEndpoints, client.InNamespace(nsToMonitor))
+			if err != nil {
+				logger.Error(err, "Failed to list endpoints in namespace", "Namespace", nsToMonitor)
+				return ctrl.Result{}, err
+			}
+			// FIX: iterate endpoints.Items (one Endpoints object per service)
+			for _, endpoints := range allEndpoints.Items {
+				var relatedPods []corev1.Pod
+				// FIX: iterate endpoints.Subsets (not endpoints.Items)
+				for _, subset := range endpoints.Subsets {
+					allAddresses := append(subset.Addresses, subset.NotReadyAddresses...)
+					for _, addr := range allAddresses {
+						if addr.TargetRef == nil || addr.TargetRef.Kind != "Pod" {
+							continue // skip non-pod endpoints (e.g. external IPs)
+						}
+						pod := &corev1.Pod{}
+						// FIX: use r.Get instead of c.Get
+						err = r.Get(ctx, client.ObjectKey{
+							Name:      addr.TargetRef.Name,
+							Namespace: addr.TargetRef.Namespace,
+						}, pod)
+						if err != nil {
+							// FIX: return ctrl.Result{} instead of nil
+							return ctrl.Result{}, fmt.Errorf("failed to get pod %s/%s: %w",
+								addr.TargetRef.Namespace, addr.TargetRef.Name, err)
+						}
+						relatedPods = append(relatedPods, *pod)
+					}
+				}
+				// FIX: > 0 instead of > =
+				if len(relatedPods) > 0 {
+					firstPod := relatedPods[0]
+					// FIX: check err == nil (success case), not err != nil
+					allLivenessUrls, err := utils.GetLivenessProbesOfPod(ctx, firstPod)
+					if err == nil && len(allLivenessUrls) > 0 {
+						// FIX: declare variables properly
+						probeName := endpoints.Name + "-" + endpoints.Namespace + "-probe"
+						probeTargetName := endpoints.Name + "." + endpoints.Namespace + ".svc.cluster.local" + allLivenessUrls[0]
+						logger.Info("Probe taregt is ", "probeTargetName ", probeTargetName)
+						if slices.Contains(seeOperatorLive.Status.ProbeNames, probeName) {
+							continue
+						}
+						createdProbe, err := utils.CreateProbe(ctx, r.Client, &seeOperatorLive, *r.Scheme, probeName, probeTargetName, blackboxExporterUrl, endpoints.Namespace, seeOperatorLive.Spec.ProbeSelectorLabels)
+						if err != nil {
+							logger.Error(err, "Failed Create Probe Reconcile", "probeName", probeName)
+							return ctrl.Result{}, err
+						}
+						seeOperatorLive.Status.ProbeNames = append(seeOperatorLive.Status.ProbeNames, probeName)
+						err = r.Status().Update(ctx, &seeOperatorLive)
+						if err != nil {
+							logger.Error(err, "Failed Update probeNames in operator status", "probeName", probeName)
+							errRemove := r.Delete(ctx, createdProbe)
+							if errRemove != nil {
+								logger.Error(errRemove, "Failed delete probe", "probeName", probeName)
+								return ctrl.Result{}, errRemove
+							}
+							return ctrl.Result{}, err
+						}
+					}
+				}
+			}
+		}
+	} else {
+		logger.Info("No need to sweep")
+	}
+
+	// now cases for matching number of namespacesToMonitor in status and statusNamespacesToMonitor
+
 	// 1) if both namespacesToMonitor and statusNamespacesToMonitor are nil, then do nothing
 	if namespacesToMonitor == nil && statusNamespacesToMonitor == nil {
 		logger.Info("Both namespacesToMonitor and statusNamespacesToMonitor are nil, doing nothing")
@@ -212,6 +351,7 @@ func (r *SeeOperatorReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 			logger.Info("Deleted all probes in namespace", "Namespace", ns)
 		}
 		seeOperatorLive.Status.Namespaces = nil
+		seeOperatorLive.Status.ProbeNames = nil
 		err = r.Status().Update(ctx, &seeOperatorLive)
 		if err != nil {
 			logger.Error(err, "Failed to update SeeOperator status")
@@ -223,60 +363,75 @@ func (r *SeeOperatorReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	// 3) if namespacesToMonitor is not nil and statusNamespacesToMonitor is empty
 	if namespacesToMonitor != nil && statusNamespacesToMonitor == nil {
 		for _, ns := range namespacesToMonitor {
-			var podList corev1.PodList
-			err = r.List(ctx, &podList, client.InNamespace(ns))
-			if err != nil {
-				logger.Error(err, "Failed to list pods in namespace", "Namespace", ns)
+			allEndpoints := &corev1.EndpointsList{}
+			// FIX: use allEndpoints, remove trailing client.
+			err = r.List(ctx, allEndpoints, client.InNamespace(ns))
+			if err != nil && apierrors.IsNotFound(err) {
+				logger.Info("No Endpoints in namespace", "Namespace", ns)
+				continue
+			} else if err != nil {
+				logger.Error(err, "Can't get endpoints in namespace", "Namespace", ns)
 				return ctrl.Result{}, err
 			}
-			for _, pod := range podList.Items {
-				for _, c := range pod.Spec.Containers {
-					liveProbe := c.LivenessProbe
-					if liveProbe == nil {
-						logger.Info("Container has no liveness probe", "Container", c.Name)
-						continue
-					}
-					switch {
-					case liveProbe.HTTPGet != nil:
-						http := liveProbe.HTTPGet
-						logger.Info("Container has HTTP liveness probe", "Container", c.Name, "Path", http.Path, "Port", http.Port.String())
-						probe := manifests.GetProbe(r.Scheme)
-						probe.Name = pod.Name + "-" + c.Name + "-probe"
-						probe.Namespace = ns
-						probe.Spec.Targets.StaticConfig.Targets = []string{liveProbe.HTTPGet.Path}
-						probe.Spec.ProberSpec.URL = blackboxExporterUrl
-
-						prometheusLabels := seeOperatorLive.Spec.ProbeSelectorLabels
-						if prometheusLabels == nil {
-							logger.Info("No Prometheus labels provided in the CRD, using default labels")
-							prometheusLabels = map[string]string{
-								"createdBy": "see-operator",
-							}
-						} else {
-							logger.Info("Using provided Prometheus labels from the CRD", "Labels", prometheusLabels)
+			// FIX: iterate endpoints.Items (one Endpoints per service)
+			for _, endpoints := range allEndpoints.Items {
+				var relatedPods []corev1.Pod
+				// FIX: iterate endpoints.Subsets (not endpoints.Items)
+				for _, subset := range endpoints.Subsets {
+					allAddresses := append(subset.Addresses, subset.NotReadyAddresses...)
+					for _, addr := range allAddresses {
+						if addr.TargetRef == nil || addr.TargetRef.Kind != "Pod" {
+							continue
 						}
-						probe.Labels = prometheusLabels
-
-						err = r.Create(ctx, probe)
+						pod := &corev1.Pod{}
+						// FIX: use r.Get instead of c.Get
+						err = r.Get(ctx, client.ObjectKey{
+							Name:      addr.TargetRef.Name,
+							Namespace: addr.TargetRef.Namespace,
+						}, pod)
 						if err != nil {
-							logger.Error(err, "Failed to create probe for container", "Container", c.Name)
+							// FIX: return ctrl.Result{} instead of nil
+							return ctrl.Result{}, fmt.Errorf("failed to get pod %s/%s: %w",
+								addr.TargetRef.Namespace, addr.TargetRef.Name, err)
+						}
+						relatedPods = append(relatedPods, *pod)
+					}
+				}
+				// FIX: > 0 instead of > =
+				if len(relatedPods) > 0 {
+					firstPod := relatedPods[0]
+					// FIX: check err == nil (success case), not err != nil
+					allLivenessUrls, err := utils.GetLivenessProbesOfPod(ctx, firstPod)
+					if err == nil && len(allLivenessUrls) > 0 {
+						// FIX: declare variables properly
+						probeName := endpoints.Name + "-" + endpoints.Namespace + "-probe"
+						probeTargetName := endpoints.Name + "." + endpoints.Namespace + ".svc.cluster.local" + allLivenessUrls[0]
+						createdProbe, err := utils.CreateProbe(ctx, r.Client, &seeOperatorLive, *r.Scheme, probeName, probeTargetName, blackboxExporterUrl, endpoints.Namespace, seeOperatorLive.Spec.ProbeSelectorLabels)
+						if err != nil {
+							logger.Error(err, "Failed Create Probe Reconcile", "probeName", probeName)
 							return ctrl.Result{}, err
 						}
-						logger.Info("Created probe for container", "Container", c.Name, "Probe", probe.Name)
-
-						seeOperatorLive.Status.ProbeNames = append(seeOperatorLive.Status.ProbeNames, probe.Name)
-						if !slices.Contains(seeOperatorLive.Status.Namespaces, ns) {
-							seeOperatorLive.Status.Namespaces = append(seeOperatorLive.Status.Namespaces, ns)
-						}
+						seeOperatorLive.Status.ProbeNames = append(seeOperatorLive.Status.ProbeNames, probeName)
 						err = r.Status().Update(ctx, &seeOperatorLive)
 						if err != nil {
-							logger.Error(err, "Failed to update SeeOperator status")
+							logger.Error(err, "Failed Update probeNames in operator status", "probeName", probeName)
+							errRemove := r.Delete(ctx, createdProbe)
+							if errRemove != nil {
+								logger.Error(errRemove, "Failed delete probe", "probeName", probeName)
+								return ctrl.Result{}, errRemove
+							}
 							return ctrl.Result{}, err
 						}
-						logger.Info("Updated SeeOperator status with new probe and namespace", "Probe", probe.Name, "Namespace", ns)
 					}
 				}
 			}
+		}
+		// update status namespaces after creating probes
+		seeOperatorLive.Status.Namespaces = namespacesToMonitor
+		err = r.Status().Update(ctx, &seeOperatorLive)
+		if err != nil {
+			logger.Error(err, "Failed to update SeeOperator status namespaces")
+			return ctrl.Result{}, err
 		}
 	}
 
@@ -290,33 +445,76 @@ func (r *SeeOperatorReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 			logger.Info("namespacesToMonitor and statusNamespacesToMonitor are not equal, updating status to match the spec")
 			if len(namespacesToMonitor) > len(statusNamespacesToMonitor) {
 				logger.Info("More namespaces in spec than in status ==> we need to create probes for the new namespaces and update the status")
-				for _, specNs := range namespacesToMonitor {
-					if !slices.Contains(statusNamespacesToMonitor, specNs) {
-						var nsPodList corev1.PodList
-						err = r.List(ctx, &nsPodList, client.InNamespace(specNs))
-						if err != nil {
-							logger.Error(err, "Failed to list pods in namespace", "Namespace", specNs)
-							return ctrl.Result{}, err
-						}
-						for _, pod := range nsPodList.Items {
-							for _, c := range pod.Spec.Containers {
-								liveProbe := c.LivenessProbe
-								if liveProbe == nil {
-									logger.Info("Container has no liveness probe")
+				for _, ns := range namespacesToMonitor {
+					allEndpoints := &corev1.EndpointsList{}
+					// FIX: use allEndpoints, remove trailing client.
+					err = r.List(ctx, allEndpoints, client.InNamespace(ns))
+					if err != nil && apierrors.IsNotFound(err) {
+						logger.Info("No Endpoints in namespace", "Namespace", ns)
+						continue
+					} else if err != nil {
+						logger.Error(err, "Can't get endpoints in namespace", "Namespace", ns)
+						return ctrl.Result{}, err
+					}
+					// FIX: iterate endpoints.Items (one Endpoints per service)
+					for _, endpoints := range allEndpoints.Items {
+						var relatedPods []corev1.Pod
+						// FIX: iterate endpoints.Subsets (not endpoints.Items)
+						for _, subset := range endpoints.Subsets {
+							allAddresses := append(subset.Addresses, subset.NotReadyAddresses...)
+							for _, addr := range allAddresses {
+								if addr.TargetRef == nil || addr.TargetRef.Kind != "Pod" {
 									continue
 								}
-								switch {
-								case liveProbe.HTTPGet != nil:
-									http := liveProbe.HTTPGet
-									logger.Info("Container has HTTP liveness probe", "Container", c.Name, "Path", http.Path, "Port", http.Port.String())
-									probe := manifests.GetProbe(r.Scheme)
-									probe.Name = pod.Name + "-" + c.Name + "-probe"
-									probe.Namespace = specNs
-									probe.Spec.Targets.StaticConfig.Targets = []string{liveProbe.HTTPGet.Path}
+								pod := &corev1.Pod{}
+								// FIX: use r.Get instead of c.Get
+								err = r.Get(ctx, client.ObjectKey{
+									Name:      addr.TargetRef.Name,
+									Namespace: addr.TargetRef.Namespace,
+								}, pod)
+								if err != nil {
+									// FIX: return ctrl.Result{} instead of nil
+									return ctrl.Result{}, fmt.Errorf("failed to get pod %s/%s: %w",
+										addr.TargetRef.Namespace, addr.TargetRef.Name, err)
+								}
+								relatedPods = append(relatedPods, *pod)
+							}
+						}
+						// FIX: > 0 instead of > =
+						if len(relatedPods) > 0 {
+							firstPod := relatedPods[0]
+							// FIX: check err == nil (success case), not err != nil
+							allLivenessUrls, err := utils.GetLivenessProbesOfPod(ctx, firstPod)
+							if err == nil && len(allLivenessUrls) > 0 {
+								// FIX: declare variables properly
+								probeName := endpoints.Name + "-" + endpoints.Namespace + "-probe"
+								probeTargetName := endpoints.Name + "." + endpoints.Namespace + ".svc.cluster.local" + allLivenessUrls[0]
+								createdProbe, err := utils.CreateProbe(ctx, r.Client, &seeOperatorLive, *r.Scheme, probeName, probeTargetName, blackboxExporterUrl, endpoints.Namespace, seeOperatorLive.Spec.ProbeSelectorLabels)
+								if err != nil {
+									logger.Error(err, "Failed Create Probe Reconcile", "probeName", probeName)
+									return ctrl.Result{}, err
+								}
+								seeOperatorLive.Status.ProbeNames = append(seeOperatorLive.Status.ProbeNames, probeName)
+								err = r.Status().Update(ctx, &seeOperatorLive)
+								if err != nil {
+									logger.Error(err, "Failed Update probeNames in operator status", "probeName", probeName)
+									errRemove := r.Delete(ctx, createdProbe)
+									if errRemove != nil {
+										logger.Error(errRemove, "Failed delete probe", "probeName", probeName)
+										return ctrl.Result{}, errRemove
+									}
+									return ctrl.Result{}, err
 								}
 							}
 						}
 					}
+				}
+				// update status namespaces
+				seeOperatorLive.Status.Namespaces = namespacesToMonitor
+				err = r.Status().Update(ctx, &seeOperatorLive)
+				if err != nil {
+					logger.Error(err, "Failed to update SeeOperator status namespaces")
+					return ctrl.Result{}, err
 				}
 			} else {
 				logger.Info("More namespaces in status than in spec ==> we need to delete probes for the removed namespaces and update the status")
@@ -333,6 +531,11 @@ func (r *SeeOperatorReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 							if err != nil {
 								logger.Error(err, "Failed to delete probe", "Probe", probe.Name)
 								return ctrl.Result{}, err
+							}
+							// FIX: use seeOperatorLive (not seeOperator) and ProbeNames (PascalCase)
+							probeIndex := slices.Index(seeOperatorLive.Status.ProbeNames, probe.Name)
+							if probeIndex != -1 {
+								seeOperatorLive.Status.ProbeNames = slices.Delete(seeOperatorLive.Status.ProbeNames, probeIndex, probeIndex+1)
 							}
 						}
 						logger.Info("Deleted all probes in namespace", "Namespace", statusNs)
