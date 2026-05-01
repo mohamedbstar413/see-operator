@@ -129,7 +129,8 @@ func (r *SeeOperatorReconciler) createProbesForNamespace(
 			continue
 		}
 
-		probeTargetName := endpoints.Name + "." + endpoints.Namespace + ".svc.cluster.local" + allLivenessUrls[0]
+		svcHost := endpoints.Name + "." + endpoints.Namespace + ".svc.cluster.local"
+		probeTargetName := "http://" + svcHost + allLivenessUrls[0]
 		logger.Info("Creating probe", "probeName", probeName, "target", probeTargetName)
 
 		createdProbe, err := utils.CreateProbe(
@@ -247,9 +248,6 @@ func (r *SeeOperatorReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 
 	// ── resolve blackbox exporter URL ─────────────────────────────────────
 	blackboxExporterUrl := seeOperatorLive.Spec.BlackboxUrl
-	if blackboxExporterUrl == "" {
-		blackboxExporterUrl = seeOperatorLive.Status.BlackboxExporterUrl
-	}
 
 	if blackboxExporterUrl != "" {
 		logger.Info("Blackbox exporter URL provided in CRD", "url", blackboxExporterUrl)
