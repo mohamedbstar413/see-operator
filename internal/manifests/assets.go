@@ -11,6 +11,7 @@ import (
 	//for Job and CronJob
 	//for ConfigMap, Service.
 
+	//For GrafanaDashboard
 	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1" //For Probe
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
@@ -104,4 +105,21 @@ func GetBlackboxDeployment(scheme *runtime.Scheme) *appsv1.Deployment {
 		panic(err)
 	}
 	return deployObject.(*appsv1.Deployment)
+}
+
+func GetGrafanaDash(scheme *runtime.Scheme) *corev1.ConfigMap {
+	dashBytes, err := manifests.ReadFile("assets/grafana-dash.yaml")
+	if err != nil {
+		fmt.Printf("Error reading Grafana Dashboard file: %v", err)
+		panic(err)
+	}
+	//create a codecs to transform the bytes to yaml
+	codecs := serializer.NewCodecFactory(scheme)
+	dashObject, err := runtime.Decode(
+		codecs.UniversalDecoder(corev1.SchemeGroupVersion), dashBytes)
+	if err != nil {
+		fmt.Printf("Error decoding Grafana Dashboard object: %v", err)
+		panic(err)
+	}
+	return dashObject.(*corev1.ConfigMap)
 }

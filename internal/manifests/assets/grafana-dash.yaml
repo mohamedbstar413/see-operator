@@ -1,0 +1,59 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: probes-dashboard
+  labels:
+    grafana_dashboard: "1"
+data:
+  probes-dashboard.json: |
+    {
+      "title": "Blackbox Probes Dashboard",
+      "schemaVersion": 36,
+      "version": 1,
+      "templating": {
+        "list": [
+          {
+            "name": "namespace",
+            "type": "query",
+            "datasource": "Prometheus",
+            "query": "label_values(probe_success, namespace)",
+            "refresh": 1,
+            "multi": true,
+            "includeAll": true
+          },
+          {
+            "name": "service",
+            "type": "query",
+            "datasource": "Prometheus",
+            "query": "label_values(probe_success{namespace=~\"$namespace\"}, service)",
+            "refresh": 1,
+            "multi": true,
+            "includeAll": true
+          }
+        ]
+      },
+      "panels": [
+        {
+          "type": "timeseries",
+          "title": "Probe Success",
+          "targets": [
+            {
+              "expr": "probe_success{namespace=~\"$namespace\", service=~\"$service\"}",
+              "legendFormat": "{{service}}"
+            }
+          ],
+          "gridPos": { "x": 0, "y": 0, "w": 24, "h": 8 }
+        },
+        {
+          "type": "timeseries",
+          "title": "Probe Latency",
+          "targets": [
+            {
+              "expr": "probe_duration_seconds{namespace=~\"$namespace\", service=~\"$service\"}",
+              "legendFormat": "{{service}}"
+            }
+          ],
+          "gridPos": { "x": 0, "y": 8, "w": 24, "h": 8 }
+        }
+      ]
+    }

@@ -31,6 +31,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	log "sigs.k8s.io/controller-runtime/pkg/log"
 
+	integreatlyv1alpha1 "github.com/grafana/grafana-operator/v5/api/v1beta1" //For GrafanaDashboard
 	seeoperatorv1 "github.com/mohamedbstar413/see-operator/api/v1"
 	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 	batchv1 "k8s.io/api/batch/v1"
@@ -234,13 +235,13 @@ func (r *SeeOperatorReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 
 	seeoperatorv1.AddToScheme(r.Scheme)
 	monitoringv1.AddToScheme(r.Scheme)
+	integreatlyv1alpha1.AddToScheme(r.Scheme)
 
 	// ── fetch the SeeOperator CR ──────────────────────────────────────────
 	var seeOperatorLive seeoperatorv1.SeeOperator
 	if err := r.Get(ctx, req.NamespacedName, &seeOperatorLive); err != nil {
 		if apierrors.IsNotFound(err) {
-			logger.Error(err, "SeeOperator not found, probably deleted")
-			// TODO: clean dependent resources and remove finalizer
+			logger.Info("SeeOperator not found, probably deleted")
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err
@@ -292,6 +293,13 @@ func (r *SeeOperatorReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	cronjob := manifests.GetCronJobYaml(r.Scheme)
 	cronjob.Namespace = seeOperatorLive.Namespace
 	if err := r.createIfNotExists(ctx, cronjob, &seeOperatorLive); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	// ── ensure grafana dashboard exists ─────────────────────────────────────────────
+	dash := manifests.GetGrafanaDash(r.Scheme)
+	dash.Namespace = seeOperatorLive.Namespace
+	if err := r.createIfNotExists(ctx, dash, &seeOperatorLive); err != nil {
 		return ctrl.Result{}, err
 	}
 
