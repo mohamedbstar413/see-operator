@@ -127,9 +127,35 @@ func (r *SeeOperatorReconciler) createProbesForNamespace(
 
 		probeName := endpoints.Name + "-" + endpoints.Namespace + "-probe"
 
-		// skip if probe already tracked in status
-		if slices.Contains(seeOperatorLive.Status.ProbeNames, probeName) {
+		// check if probe actually exists in cluster
+		existingProbe := &monitoringv1.Probe{}
+		err = r.Get(ctx, client.ObjectKey{Name: probeName, Namespace: ns}, existingProbe)
+		if err == nil {
+			// probe exists in cluster — truly skip
 			continue
+		}
+		if !apierrors.IsNotFound(err) {
+			return err
+		}
+
+		// probe is missing from cluster — remove stale entry from status if present
+		if slices.Contains(seeOperatorLive.Status.ProbeNames, probeName) {
+			if err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
+				latest := &seeoperatorv1.SeeOperator{}
+				if err := r.Get(ctx, namespacedName, latest); err != nil {
+					return err
+				}
+				if idx := slices.Index(latest.Status.ProbeNames, probeName); idx != -1 {
+					latest.Status.ProbeNames = slices.Delete(latest.Status.ProbeNames, idx, idx+1)
+				}
+				return r.Status().Update(ctx, latest)
+			}); err != nil {
+				return fmt.Errorf("failed to remove stale probe from status: %w", err)
+			}
+			// update local copy so subsequent iterations see the change
+			if idx := slices.Index(seeOperatorLive.Status.ProbeNames, probeName); idx != -1 {
+				seeOperatorLive.Status.ProbeNames = slices.Delete(seeOperatorLive.Status.ProbeNames, idx, idx+1)
+			}
 		}
 
 		svcHost := endpoints.Name + "." + endpoints.Namespace + ".svc.cluster.local"
@@ -168,11 +194,12 @@ func (r *SeeOperatorReconciler) createProbesForNamespace(
 }
 
 // ─────────────────────────────────────────────
-// HELPER 3 — delete all probes in a namespace
+// HELPER 3 — delete managed probes in a namespace
 // ─────────────────────────────────────────────
 
-// deleteProbesInNamespace removes every Probe CR in ns and keeps
-// seeOperatorLive.Status.ProbeNames in sync.
+// deleteProbesInNamespace deletes the probes that this controller creates for
+// services in ns. It derives the probe names from the namespace's endpoints so
+// teardown does not depend on status being fully populated.
 func (r *SeeOperatorReconciler) deleteProbesInNamespace(
 	ctx context.Context,
 	ns string,
@@ -180,26 +207,76 @@ func (r *SeeOperatorReconciler) deleteProbesInNamespace(
 ) error {
 	logger := log.FromContext(ctx)
 
-	var probeList monitoringv1.ProbeList
-	if err := r.List(ctx, &probeList, client.InNamespace(ns)); err != nil {
+	endpointsList := &corev1.EndpointsList{}
+	if err := r.List(ctx, endpointsList, client.InNamespace(ns)); err != nil {
 		if apierrors.IsNotFound(err) {
 			return nil
 		}
-		return fmt.Errorf("failed to list probes in namespace %s: %w", ns, err)
+		return fmt.Errorf("failed to list endpoints in namespace %s: %w", ns, err)
 	}
 
-	for _, probe := range probeList.Items {
-		if err := r.Delete(ctx, &probe); err != nil {
+	deletedNames := []string{}
+	for _, endpoints := range endpointsList.Items {
+		probeName := endpoints.Name + "-" + endpoints.Namespace + "-probe"
+		probe := &monitoringv1.Probe{}
+		if err := r.Get(ctx, client.ObjectKey{Name: probeName, Namespace: ns}, probe); err != nil {
+			if apierrors.IsNotFound(err) {
+				continue
+			}
+			return fmt.Errorf("failed to get probe %s in namespace %s: %w", probeName, ns, err)
+		}
+		if err := r.Delete(ctx, probe); err != nil && !apierrors.IsNotFound(err) {
 			logger.Error(err, "Failed to delete probe", "probe", probe.Name)
 			return err
 		}
-		if idx := slices.Index(seeOperatorLive.Status.ProbeNames, probe.Name); idx != -1 {
-			seeOperatorLive.Status.ProbeNames = slices.Delete(seeOperatorLive.Status.ProbeNames, idx, idx+1)
+		deletedNames = append(deletedNames, probe.Name)
+	}
+
+	// persist ProbeNames removal to status
+	if len(deletedNames) > 0 {
+		err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			latest := &seeoperatorv1.SeeOperator{}
+			if err := r.Get(ctx, client.ObjectKey{Namespace: seeOperatorLive.Namespace, Name: seeOperatorLive.Name}, latest); err != nil {
+				return err
+			}
+			for _, name := range deletedNames {
+				if idx := slices.Index(latest.Status.ProbeNames, name); idx != -1 {
+					latest.Status.ProbeNames = slices.Delete(latest.Status.ProbeNames, idx, idx+1)
+				}
+			}
+			return r.Status().Update(ctx, latest)
+		})
+		if err != nil {
+			return fmt.Errorf("failed to update probe names in status after deletion: %w", err)
 		}
 	}
 
 	logger.Info("Deleted all probes in namespace", "namespace", ns)
 	return nil
+}
+
+// cleanupNamespaces returns the set of namespaces we should clean up during deletion.
+func cleanupNamespaces(seeOperatorLive *seeoperatorv1.SeeOperator) []string {
+	namespaceSet := make(map[string]struct{})
+	namespaces := make([]string, 0, len(seeOperatorLive.Status.Namespaces)+len(seeOperatorLive.Spec.NamespacesToMonitor))
+
+	add := func(items []string) {
+		for _, ns := range items {
+			if ns == "" {
+				continue
+			}
+			if _, ok := namespaceSet[ns]; ok {
+				continue
+			}
+			namespaceSet[ns] = struct{}{}
+			namespaces = append(namespaces, ns)
+		}
+	}
+
+	add(seeOperatorLive.Status.Namespaces)
+	add(seeOperatorLive.Spec.NamespacesToMonitor)
+
+	return namespaces
 }
 
 // ─────────────────────────────────────────────
@@ -247,7 +324,7 @@ func (r *SeeOperatorReconciler) cleanup(
 	logger.Info("Running cleanup before deletion")
 
 	// delete all probes across all monitored namespaces
-	for _, ns := range seeOperatorLive.Status.Namespaces {
+	for _, ns := range cleanupNamespaces(seeOperatorLive) {
 		if err := r.deleteProbesInNamespace(ctx, ns, seeOperatorLive); err != nil {
 			return fmt.Errorf("failed to delete probes in namespace %s: %w", ns, err)
 		}
@@ -300,8 +377,9 @@ func (r *SeeOperatorReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 				if err := r.Get(ctx, namespacedName, latest); err != nil {
 					return err
 				}
+
 				controllerutil.RemoveFinalizer(latest, seeOperatorFinalizer)
-				return r.Status().Update(ctx, latest)
+				return r.Update(ctx, latest) // ← normal Update
 			})
 			if err != nil {
 				logger.Error(err, "Failed to remove finalizer")
@@ -319,8 +397,11 @@ func (r *SeeOperatorReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 			if err := r.Get(ctx, namespacedName, latest); err != nil {
 				return err
 			}
-			controllerutil.AddFinalizer(&seeOperatorLive, seeOperatorFinalizer)
-			return r.Status().Update(ctx, latest)
+
+			if controllerutil.AddFinalizer(latest, seeOperatorFinalizer) { // ← use latest
+				return r.Update(ctx, latest) // ← normal Update, not Status
+			}
+			return nil
 		})
 		if err != nil {
 			logger.Error(err, "Failed to add finalizer")
@@ -447,6 +528,7 @@ func (r *SeeOperatorReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 				return ctrl.Result{}, err
 			}
 		}
+		return ctrl.Result{}, nil
 	} else {
 		logger.Info("No sweep needed")
 	}
@@ -457,10 +539,10 @@ func (r *SeeOperatorReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return ctrl.Result{}, nil
 	}
 
-	// ── case 2: spec cleared → delete all probes ─────────────────────────
+	// ── case 2: spec cleared -> delete all probes ─────────────────────────
 	if namespacesToMonitor == nil && statusNamespacesToMonitor != nil {
 		logger.Info("Spec namespaces removed, deleting all probes")
-		for _, ns := range statusNamespacesToMonitor {
+		for _, ns := range cleanupNamespaces(&seeOperatorLive) {
 			if err := r.deleteProbesInNamespace(ctx, ns, &seeOperatorLive); err != nil {
 				return ctrl.Result{}, err
 			}

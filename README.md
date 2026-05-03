@@ -1,135 +1,146 @@
 # see-op
-// TODO(user): Add simple overview of use/purpose
 
-## Description
-// TODO(user): An in-depth paragraph about your project and overview of use
+`see-op` is a Kubernetes operator built with Kubebuilder that automates blackbox-style probing for workloads in selected namespaces.
 
-## Getting Started
+It watches a custom resource named `SeeOperator` and does three main things:
 
-### Prerequisites
-- go version v1.24.6+
-- docker version 17.03+.
-- kubectl version v1.11.3+.
-- Access to a Kubernetes v1.11.3+ cluster.
+- Deploys and manages the supporting blackbox exporter components when `spec.blackboxUrl` is not provided.
+- Discovers Services and Endpoints in the namespaces you choose, then creates Prometheus `Probe` resources for pods that expose HTTP liveness probes.
+- Cleans up managed probes when the `SeeOperator` custom resource is deleted.
 
-### To Deploy on the cluster
-**Build and push your image to the location specified by `IMG`:**
+## Features
+
+- Kubebuilder-based controller written in Go.
+- Custom resource: `seeoperators.see-operator.example.com`.
+- Creates `Probe` objects from detected pod liveness probe paths.
+- Supports either an external blackbox exporter URL or a built-in exporter deployed by the operator.
+- Uses a finalizer so probe resources are removed during deletion.
+- Includes controller and envtest-based test suites.
+
+## How It Works
+
+At a high level, the controller:
+
+1. Reads the `SeeOperator` custom resource.
+2. Adds a finalizer if needed.
+3. Deploys or reuses a blackbox exporter endpoint.
+4. Scans the namespaces listed in `spec.namespacesToMonitor`.
+5. Creates Prometheus `Probe` resources for matching endpoints.
+6. Updates status to track monitored namespaces and created probes.
+7. Removes probes during cleanup when the custom resource is deleted.
+
+## Spec
+
+The main fields in the sample CR are:
+
+- `namespacesToMonitor`: namespaces to scan for endpoints and pods.
+- `blackboxUrl`: optional external blackbox exporter URL.
+- `probeSelectorLabels`: labels applied to generated probes.
+- `intervalJob`: job interval used by the generated CronJob.
+- `dependencies`: toggles optional dependency-related behavior used by the controller.
+
+See the sample manifest at [`config/samples/see-operator_v1_seeoperator.yaml`](./config/samples/see-operator_v1_seeoperator.yaml).
+
+## Repository Layout
+
+- [`cmd/`](./cmd) - manager entrypoint.
+- [`api/v1/`](./api/v1) - `SeeOperator` API types.
+- [`internal/controller/`](./internal/controller) - reconciliation logic and tests.
+- [`internal/manifests/`](./internal/manifests) - embedded YAML templates for generated resources.
+- [`config/`](./config) - CRDs, RBAC, sample manifests, and deployment config.
+
+## Prerequisites
+
+- Go 1.24+
+- Docker or another compatible container runtime
+- kubectl
+- A Kubernetes cluster
+
+If you want to run the controller tests that use envtest, you also need the Kubebuilder test binaries available locally.
+
+## Local Development
+
+Install helper binaries:
 
 ```sh
-make docker-build docker-push IMG=<some-registry>/see-op:tag
+make manifests generate
+make fmt vet
 ```
 
-**NOTE:** This image ought to be published in the personal registry you specified.
-And it is required to have access to pull the image from the working environment.
-Make sure you have the proper permission to the registry if the above commands don’t work.
+Run the controller locally:
 
-**Install the CRDs into the cluster:**
+```sh
+make run
+```
+
+Run unit and controller tests:
+
+```sh
+make test
+```
+
+## Deploying To Kubernetes
+
+Build and push the manager image:
+
+```sh
+make docker-build docker-push IMG=<your-registry>/see-op:tag
+```
+
+Install the CRDs:
 
 ```sh
 make install
 ```
 
-**Deploy the Manager to the cluster with the image specified by `IMG`:**
+Deploy the controller:
 
 ```sh
-make deploy IMG=<some-registry>/see-op:tag
+make deploy IMG=<your-registry>/see-op:tag
 ```
 
-> **NOTE**: If you encounter RBAC errors, you may need to grant yourself cluster-admin
-privileges or be logged in as admin.
-
-**Create instances of your solution**
-You can apply the samples (examples) from the config/sample:
+Create a sample `SeeOperator` instance:
 
 ```sh
 kubectl apply -k config/samples/
 ```
 
->**NOTE**: Ensure that the samples has default values to test it out.
+## Uninstall
 
-### To Uninstall
-**Delete the instances (CRs) from the cluster:**
+Remove sample resources:
 
 ```sh
 kubectl delete -k config/samples/
 ```
 
-**Delete the APIs(CRDs) from the cluster:**
+Remove the CRDs:
 
 ```sh
 make uninstall
 ```
 
-**UnDeploy the controller from the cluster:**
+Remove the controller:
 
 ```sh
 make undeploy
 ```
 
-## Project Distribution
+## Build An Installer Bundle
 
-Following the options to release and provide this solution to the users.
-
-### By providing a bundle with all YAML files
-
-1. Build the installer for the image built and published in the registry:
+Generate a single YAML bundle for distribution:
 
 ```sh
-make build-installer IMG=<some-registry>/see-op:tag
+make build-installer IMG=<your-registry>/see-op:tag
 ```
 
-**NOTE:** The makefile target mentioned above generates an 'install.yaml'
-file in the dist directory. This file contains all the resources built
-with Kustomize, which are necessary to install this project without its
-dependencies.
+The resulting bundle is written to `dist/install.yaml`.
 
-2. Using the installer
+## Testing Notes
 
-Users can just run 'kubectl apply -f <URL for YAML BUNDLE>' to install
-the project, i.e.:
+The repository includes envtest-based controller tests under [`internal/controller/`](./internal/controller) and end-to-end tests under [`test/e2e/`](./test/e2e).
 
-```sh
-kubectl apply -f https://raw.githubusercontent.com/<org>/see-op/<tag or branch>/dist/install.yaml
-```
-
-### By providing a Helm Chart
-
-1. Build the chart using the optional helm plugin
-
-```sh
-kubebuilder edit --plugins=helm/v2-alpha
-```
-
-2. See that a chart was generated under 'dist/chart', and users
-can obtain this solution from there.
-
-**NOTE:** If you change the project, you need to update the Helm Chart
-using the same command above to sync the latest changes. Furthermore,
-if you create webhooks, you need to use the above command with
-the '--force' flag and manually ensure that any custom configuration
-previously added to 'dist/chart/values.yaml' or 'dist/chart/manager/manager.yaml'
-is manually re-applied afterwards.
-
-## Contributing
-// TODO(user): Add detailed information on how you would like others to contribute to this project
-
-**NOTE:** Run `make help` for more information on all potential `make` targets
-
-More information can be found via the [Kubebuilder Documentation](https://book.kubebuilder.io/introduction.html)
+If `make test` fails because envtest binaries are missing, install the required Kubebuilder assets first.
 
 ## License
 
-Copyright 2026.
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-
+Apache License 2.0. See the repository license for full details.

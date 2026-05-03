@@ -12,6 +12,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
@@ -83,11 +84,13 @@ func CreateProbe(ctx context.Context, c client.Client, seeOperator *seeoperatorv
 	probe.Spec.Module = "http_2xx"
 	probe.Spec.JobName = probeName
 
-	//err := ctrl.SetControllerReference(seeOperator, probe, &scheme)
-	//if err != nil {
-	//	logger.Error(err, "Failed to set controller reference for probe")
-	//	return nil, err
-	//}
+	if ns == seeOperator.Namespace {
+		if err := ctrl.SetControllerReference(seeOperator, probe, &scheme); err != nil {
+			logger.Error(err, "Failed to set controller reference for probe")
+			return nil, err
+		}
+	}
+
 	err := c.Create(ctx, probe)
 	if err != nil && apierrors.IsAlreadyExists(err) {
 		logger.Info("probe ", probeName, " already exists")

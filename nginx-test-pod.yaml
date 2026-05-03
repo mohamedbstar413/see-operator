@@ -2,7 +2,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: nginx-deployment
-  namespace: test
+  namespace: test2
   labels:
     app: nginx
 spec:
@@ -40,7 +40,7 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  namespace: test
+  namespace: test2
   name: nginx-service
 spec:
   selector:
