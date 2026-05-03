@@ -1,0 +1,28 @@
+# operator-deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: my-see-operator
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: my-operator
+  template:
+    metadata:
+      labels:
+        app: my-operator
+    spec:
+      serviceAccountName: see-operator-sa      
+      containers:
+        - name: operator
+          image: bstar999/see-operator:v1
+          imagePullPolicy: Always
+          resources:
+            limits:
+              cpu: 500m
+              memory: 256Mi
+            requests:
+              cpu: 100m
+              memory: 128Mi
