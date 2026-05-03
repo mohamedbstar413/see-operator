@@ -21,20 +21,21 @@ import (
 	"fmt"
 	"slices"
 
+	integreatlyv1alpha1 "github.com/grafana/grafana-operator/v5/api/v1beta1" //For GrafanaDashboard
+	seeoperatorv1 "github.com/mohamedbstar413/see-operator/api/v1"
 	manifests "github.com/mohamedbstar413/see-operator/internal/manifests"
 	"github.com/mohamedbstar413/see-operator/internal/utils"
+	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 	appsv1 "k8s.io/api/apps/v1"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	controllerutil "sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	log "sigs.k8s.io/controller-runtime/pkg/log"
-
-	integreatlyv1alpha1 "github.com/grafana/grafana-operator/v5/api/v1beta1" //For GrafanaDashboard
-	seeoperatorv1 "github.com/mohamedbstar413/see-operator/api/v1"
-	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
-	batchv1 "k8s.io/api/batch/v1"
 )
 
 // SeeOperatorReconciler reconciles a SeeOperator object
@@ -98,6 +99,7 @@ func (r *SeeOperatorReconciler) createProbesForNamespace(
 	blackboxExporterUrl string,
 ) error {
 	logger := log.FromContext(ctx)
+	namespacedName := client.ObjectKey{Namespace: ns, Name: seeOperatorLive.Name}
 
 	allEndpoints := &corev1.EndpointsList{}
 	if err := r.List(ctx, allEndpoints, client.InNamespace(ns)); err != nil {
@@ -143,10 +145,17 @@ func (r *SeeOperatorReconciler) createProbesForNamespace(
 			logger.Error(err, "Failed to create probe", "probeName", probeName)
 			return err
 		}
-
-		seeOperatorLive.Status.ProbeNames = append(seeOperatorLive.Status.ProbeNames, probeName)
-		if err = r.Status().Update(ctx, seeOperatorLive); err != nil {
-			logger.Error(err, "Failed to update ProbeNames in status, rolling back probe creation", "probeName", probeName)
+		err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			latest := &seeoperatorv1.SeeOperator{}
+			if err := r.Get(ctx, namespacedName, latest); err != nil {
+				return err
+			}
+			latest.Status.ProbeNames = append(seeOperatorLive.Status.ProbeNames, probeName)
+			return r.Status().Update(ctx, latest)
+		})
+		if err != nil {
+			logger.Error(err, "Failed to update probe names in status")
+			logger.Info("Rolling back probe creation due to status update failure", "probeName", probeName)
 			if errRemove := r.Delete(ctx, createdProbe); errRemove != nil {
 				logger.Error(errRemove, "Failed to delete probe during rollback", "probeName", probeName)
 				return errRemove
@@ -227,15 +236,43 @@ func (r *SeeOperatorReconciler) resolvePodsFromEndpoints(
 }
 
 // ─────────────────────────────────────────────
+// cleanup — remove all owned resources before deletion
+// ─────────────────────────────────────────────
+
+func (r *SeeOperatorReconciler) cleanup(
+	ctx context.Context,
+	seeOperatorLive *seeoperatorv1.SeeOperator,
+) error {
+	logger := log.FromContext(ctx)
+	logger.Info("Running cleanup before deletion")
+
+	// delete all probes across all monitored namespaces
+	for _, ns := range seeOperatorLive.Status.Namespaces {
+		if err := r.deleteProbesInNamespace(ctx, ns, seeOperatorLive); err != nil {
+			return fmt.Errorf("failed to delete probes in namespace %s: %w", ns, err)
+		}
+	}
+
+	// owned resources (blackbox deployment, service, configmap, cronjob,
+	// grafana dashboard CM) are in the same namespace as the CR so
+	// Kubernetes garbage-collects them automatically via owner references
+	// — no manual deletion needed for those.
+
+	logger.Info("Cleanup completed successfully")
+	return nil
+}
+
+// ─────────────────────────────────────────────
 // RECONCILE — lean main loop
 // ─────────────────────────────────────────────
 
 func (r *SeeOperatorReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
-
+	const seeOperatorFinalizer = "see-operator.example.com/finalizer"
 	seeoperatorv1.AddToScheme(r.Scheme)
 	monitoringv1.AddToScheme(r.Scheme)
 	integreatlyv1alpha1.AddToScheme(r.Scheme)
+	namespacedName := client.ObjectKey{Namespace: req.Namespace, Name: req.Name}
 
 	// ── fetch the SeeOperator CR ──────────────────────────────────────────
 	var seeOperatorLive seeoperatorv1.SeeOperator
@@ -247,13 +284,62 @@ func (r *SeeOperatorReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return ctrl.Result{}, err
 	}
 
+	// handle deletion with finalizer
+	if !seeOperatorLive.DeletionTimestamp.IsZero() {
+		// CR is being deleted
+		if controllerutil.ContainsFinalizer(&seeOperatorLive, seeOperatorFinalizer) {
+			// run cleanup
+			if err := r.cleanup(ctx, &seeOperatorLive); err != nil {
+				logger.Error(err, "Failed to run cleanup during deletion")
+				return ctrl.Result{}, err
+			}
+			// remove the finalizer so Kubernetes can delete the CR
+			err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+				latest := &seeoperatorv1.SeeOperator{}
+				if err := r.Get(ctx, namespacedName, latest); err != nil {
+					return err
+				}
+				controllerutil.RemoveFinalizer(&seeOperatorLive, seeOperatorFinalizer)
+				return r.Status().Update(ctx, latest)
+			})
+			if err != nil {
+				logger.Error(err, "Failed to remove finalizer")
+				return ctrl.Result{}, err
+			}
+		}
+		return ctrl.Result{}, nil
+	}
+	//add finalizer if not existing
+	if !controllerutil.ContainsFinalizer(&seeOperatorLive, seeOperatorFinalizer) {
+		err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			latest := &seeoperatorv1.SeeOperator{}
+			if err := r.Get(ctx, namespacedName, latest); err != nil {
+				return err
+			}
+			controllerutil.AddFinalizer(&seeOperatorLive, seeOperatorFinalizer)
+			return r.Status().Update(ctx, latest)
+		})
+		if err != nil {
+			logger.Error(err, "Failed to add finalizer")
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{}, nil // requeue after adding finalizer
+	}
+
 	// ── resolve blackbox exporter URL ─────────────────────────────────────
 	blackboxExporterUrl := seeOperatorLive.Spec.BlackboxUrl
 
 	if blackboxExporterUrl != "" {
 		logger.Info("Blackbox exporter URL provided in CRD", "url", blackboxExporterUrl)
-		seeOperatorLive.Status.BlackboxExporterUrl = blackboxExporterUrl
-		if err := r.Status().Update(ctx, &seeOperatorLive); err != nil {
+		err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			latest := &seeoperatorv1.SeeOperator{}
+			if err := r.Get(ctx, namespacedName, latest); err != nil {
+				return err
+			}
+			latest.Status.BlackboxExporterUrl = blackboxExporterUrl
+			return r.Status().Update(ctx, latest)
+		})
+		if err != nil {
 			logger.Error(err, "Failed to update blackbox exporter URL in status")
 			return ctrl.Result{}, err
 		}
@@ -282,8 +368,15 @@ func (r *SeeOperatorReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		}
 
 		blackboxExporterUrl = bbService.Name + "." + bbService.Namespace + ".svc.cluster.local:9115"
-		seeOperatorLive.Status.BlackboxExporterUrl = blackboxExporterUrl
-		if err := r.Status().Update(ctx, &seeOperatorLive); err != nil {
+		err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			latest := &seeoperatorv1.SeeOperator{}
+			if err := r.Get(ctx, namespacedName, latest); err != nil {
+				return err
+			}
+			latest.Status.BlackboxExporterUrl = blackboxExporterUrl
+			return r.Status().Update(ctx, latest)
+		})
+		if err != nil {
 			logger.Error(err, "Failed to update blackbox exporter URL in status")
 			return ctrl.Result{}, err
 		}
@@ -292,6 +385,11 @@ func (r *SeeOperatorReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	// ── ensure CronJob exists ─────────────────────────────────────────────
 	cronjob := manifests.GetCronJobYaml(r.Scheme)
 	cronjob.Namespace = seeOperatorLive.Namespace
+	err := ctrl.SetControllerReference(&seeOperatorLive, cronjob, r.Scheme)
+	if err != nil {
+		logger.Error(err, "Failed to set controller reference for CronJob")
+		return ctrl.Result{}, err
+	}
 	if err := r.createIfNotExists(ctx, cronjob, &seeOperatorLive); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -299,6 +397,11 @@ func (r *SeeOperatorReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	// ── ensure grafana dashboard exists ─────────────────────────────────────────────
 	dash := manifests.GetGrafanaDash(r.Scheme)
 	dash.Namespace = seeOperatorLive.Namespace
+	err = ctrl.SetControllerReference(&seeOperatorLive, dash, r.Scheme)
+	if err != nil {
+		logger.Error(err, "Failed to set controller reference for Grafana dashboard")
+		return ctrl.Result{}, err
+	}
 	if err := r.createIfNotExists(ctx, dash, &seeOperatorLive); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -362,7 +465,16 @@ func (r *SeeOperatorReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		}
 		seeOperatorLive.Status.Namespaces = nil
 		seeOperatorLive.Status.ProbeNames = nil
-		if err := r.Status().Update(ctx, &seeOperatorLive); err != nil {
+		err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			latest := &seeoperatorv1.SeeOperator{}
+			if err := r.Get(ctx, namespacedName, latest); err != nil {
+				return err
+			}
+			latest.Status.ProbeNames = nil
+			latest.Status.Namespaces = nil
+			return r.Status().Update(ctx, latest)
+		})
+		if err != nil {
 			logger.Error(err, "Failed to clear SeeOperator status")
 			return ctrl.Result{}, err
 		}
@@ -378,8 +490,15 @@ func (r *SeeOperatorReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 				return ctrl.Result{}, err
 			}
 		}
-		seeOperatorLive.Status.Namespaces = namespacesToMonitor
-		if err := r.Status().Update(ctx, &seeOperatorLive); err != nil {
+		err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			latest := &seeoperatorv1.SeeOperator{}
+			if err := r.Get(ctx, namespacedName, latest); err != nil {
+				return err
+			}
+			latest.Status.Namespaces = namespacesToMonitor
+			return r.Status().Update(ctx, latest)
+		})
+		if err != nil {
 			logger.Error(err, "Failed to update status namespaces")
 			return ctrl.Result{}, err
 		}
@@ -416,8 +535,15 @@ func (r *SeeOperatorReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		}
 	}
 
-	seeOperatorLive.Status.Namespaces = namespacesToMonitor
-	if err := r.Status().Update(ctx, &seeOperatorLive); err != nil {
+	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		latest := &seeoperatorv1.SeeOperator{}
+		if err := r.Get(ctx, namespacedName, latest); err != nil {
+			return err
+		}
+		latest.Status.Namespaces = namespacesToMonitor
+		return r.Status().Update(ctx, latest)
+	})
+	if err != nil {
 		logger.Error(err, "Failed to update SeeOperator status namespaces")
 		return ctrl.Result{}, err
 	}
