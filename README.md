@@ -31,13 +31,16 @@ At a high level, the controller:
 
 ## Spec
 
-The main fields in the sample CR are:
+The API currently defines these sample fields:
 
-- `namespacesToMonitor`: namespaces to scan for endpoints and pods.
-- `blackboxUrl`: optional external blackbox exporter URL.
-- `probeSelectorLabels`: labels applied to generated probes.
-- `intervalJob`: job interval used by the generated CronJob.
-- `dependencies`: toggles optional dependency-related behavior used by the controller.
+- `namespacesToMonitor`
+- `blackboxUrl`
+- `probeSelectorLabels`
+- `intervalJob`
+- `dependencies`
+- `dumy`
+
+The controller actively uses `namespacesToMonitor`, `blackboxUrl`, and `probeSelectorLabels` today.
 
 See the sample manifest at [`config/samples/see-operator_v1_seeoperator.yaml`](./config/samples/see-operator_v1_seeoperator.yaml).
 
@@ -51,7 +54,7 @@ See the sample manifest at [`config/samples/see-operator_v1_seeoperator.yaml`](.
 
 ## Prerequisites
 
-- Go 1.24+
+- Go 1.26.1+
 - Docker or another compatible container runtime
 - kubectl
 - A Kubernetes cluster
