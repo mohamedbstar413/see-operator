@@ -34,7 +34,7 @@ data:
       },
       "panels": [
         {
-          "type": "timeseries",
+          "type": "gauge",
           "title": "Probe Success",
           "targets": [
             {

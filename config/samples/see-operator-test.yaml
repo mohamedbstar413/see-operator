@@ -8,6 +8,7 @@ metadata:
 spec:
   namespacesToMonitor:
     - default
+    - test
   probeSelectorLabels:
     release: monitoring
   dependencies: false
