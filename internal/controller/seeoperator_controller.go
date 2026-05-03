@@ -99,7 +99,7 @@ func (r *SeeOperatorReconciler) createProbesForNamespace(
 	blackboxExporterUrl string,
 ) error {
 	logger := log.FromContext(ctx)
-	namespacedName := client.ObjectKey{Namespace: ns, Name: seeOperatorLive.Name}
+	namespacedName := client.ObjectKey{Namespace: seeOperatorLive.Namespace, Name: seeOperatorLive.Name}
 
 	allEndpoints := &corev1.EndpointsList{}
 	if err := r.List(ctx, allEndpoints, client.InNamespace(ns)); err != nil {
@@ -150,7 +150,7 @@ func (r *SeeOperatorReconciler) createProbesForNamespace(
 			if err := r.Get(ctx, namespacedName, latest); err != nil {
 				return err
 			}
-			latest.Status.ProbeNames = append(seeOperatorLive.Status.ProbeNames, probeName)
+			latest.Status.ProbeNames = append(latest.Status.ProbeNames, probeName)
 			return r.Status().Update(ctx, latest)
 		})
 		if err != nil {
@@ -286,6 +286,7 @@ func (r *SeeOperatorReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 
 	// handle deletion with finalizer
 	if !seeOperatorLive.DeletionTimestamp.IsZero() {
+		logger.Info("SeeOperator is being deleted, running finalizer logic")
 		// CR is being deleted
 		if controllerutil.ContainsFinalizer(&seeOperatorLive, seeOperatorFinalizer) {
 			// run cleanup
@@ -299,18 +300,20 @@ func (r *SeeOperatorReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 				if err := r.Get(ctx, namespacedName, latest); err != nil {
 					return err
 				}
-				controllerutil.RemoveFinalizer(&seeOperatorLive, seeOperatorFinalizer)
+				controllerutil.RemoveFinalizer(latest, seeOperatorFinalizer)
 				return r.Status().Update(ctx, latest)
 			})
 			if err != nil {
 				logger.Error(err, "Failed to remove finalizer")
 				return ctrl.Result{}, err
 			}
+			logger.Info("Removed Finalizer")
 		}
 		return ctrl.Result{}, nil
 	}
 	//add finalizer if not existing
 	if !controllerutil.ContainsFinalizer(&seeOperatorLive, seeOperatorFinalizer) {
+		logger.Info("Adding finalizer to SeeOperator")
 		err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 			latest := &seeoperatorv1.SeeOperator{}
 			if err := r.Get(ctx, namespacedName, latest); err != nil {
@@ -323,7 +326,6 @@ func (r *SeeOperatorReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 			logger.Error(err, "Failed to add finalizer")
 			return ctrl.Result{}, err
 		}
-		return ctrl.Result{}, nil // requeue after adding finalizer
 	}
 
 	// ── resolve blackbox exporter URL ─────────────────────────────────────
